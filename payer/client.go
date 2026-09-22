@@ -121,7 +121,12 @@ func (c *Client) Do(ctx context.Context, build RequestFunc) (*http.Response, *Re
 
 	paid, err := c.send(ctx, build, pay.Header)
 	if err != nil {
-		c.payer.Rollback(pay)
+		// The answer did not arrive. The sidecar may have broadcast the
+		// transaction, so the payer must not take the payment back here.
+		// The Payer asks the chain about it on the next payment.
+		c.payer.Unresolved(pay)
+		c.log.Error("the answer to a payment did not arrive. The payer reads the chain on the next payment.",
+			"err", err, "tx", pay.TxHash, "amount", pay.Amount, "asset", pay.Asset)
 		return nil, nil, err
 	}
 

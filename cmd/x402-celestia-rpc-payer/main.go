@@ -183,7 +183,7 @@ func newRuntime(cfg *payer.Config, log *slog.Logger, noPay bool) (*runtime, erro
 		return nil, err
 	}
 	accounts := payer.NewAccounts(cfg.Upstream, cfg.Network)
-	signer := payer.NewPayer(cfg, wallet, accounts.Account)
+	signer := payer.NewPayer(cfg, wallet, accounts)
 	return &runtime{client: payer.NewClient(cfg, signer, log)}, nil
 }
 

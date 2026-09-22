@@ -5,6 +5,42 @@ and the numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ## Unreleased
 
+### Fixed
+
+- **A lost answer no longer makes the budget count less than the wallet
+  spent.** When the answer of the sidecar does not arrive, the payer does not
+  know if the chain took the payment. It now keeps the payment open, and it
+  asks the free `GET /x402/tx` route of the sidecar before it signs the next
+  payment. A payment that reached a block stands, and a payment that the
+  chain does not hold goes back. The same answer picks the right account
+  sequence, so the next payment does not clash with a transaction that the
+  chain already holds.
+
+### Added
+
+- `Payment.TxHash` holds the hash of the bytes that the payer signed. The
+  payer computes it, so it knows the hash before the sidecar broadcasts the
+  transaction.
+- `Payer.Unresolved` records a payment whose answer did not arrive, and
+  `Payer.Open` lists them.
+- `GET /x402/payer/status` names each open payment in its `unresolved` field.
+
+### Changed
+
+- `NewPayer` takes a `Chain` in place of an `AccountFunc`. `Chain` has
+  `Account` and `TxStatus`, and `Accounts` satisfies it. A caller writes
+  `payer.NewPayer(cfg, wallet, accounts)` in place of
+  `payer.NewPayer(cfg, wallet, accounts.Account)`.
+- `Payer.Rollback` no longer runs when the answer does not arrive. It runs
+  only when the sidecar answered and refused the payment, because the sidecar
+  broadcast nothing in that case.
+
+### Requires
+
+- The sidecar must serve the free route `GET /x402/tx?hash=…`. An older
+  sidecar leaves each lost payment open, and the payer counts it against the
+  budget until it stops.
+
 ## 0.1.0
 
 The first public release.

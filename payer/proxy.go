@@ -117,6 +117,11 @@ func (p *Proxy) serveOwnRoutes(w http.ResponseWriter, r *http.Request) bool {
 			out["payer"] = payer.Address()
 			out["spent"] = spent.String()
 			out["payments"] = count
+			// A payment whose answer did not arrive. The payer counts it
+			// as spent until it reads the chain on the next payment.
+			if open := payer.Open(); len(open) > 0 {
+				out["unresolved"] = open
+			}
 		}
 		writeJSON(w, http.StatusOK, out)
 	default:

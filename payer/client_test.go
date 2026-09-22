@@ -203,7 +203,7 @@ mnemonic: "` + testMnemonic + `"
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	accounts := NewAccounts(cfg.Upstream, cfg.Network)
-	client := NewClient(cfg, NewPayer(cfg, wallet, accounts.Account), log)
+	client := NewClient(cfg, NewPayer(cfg, wallet, accounts), log)
 
 	res, receipt, err := client.Do(context.Background(), getFrom(cfg, "/block"))
 	if err != nil {
@@ -258,5 +258,69 @@ network: "cosmos:mocha-5"
 	}
 	if requests, _ := sidecar.counts(); requests != 1 {
 		t.Errorf("requests = %d, want 1", requests)
+	}
+}
+
+func TestClientKeepsAPaymentWhoseAnswerDidNotArrive(t *testing.T) {
+	// The sidecar takes the payment and closes the connection. It may have
+	// broadcast the transaction, so the payer must keep the money against
+	// the budget and keep the account sequence.
+	client, sidecar, cfg := newTestClient(t, &fakeSidecar{price: "1000", dropPayment: true}, "")
+
+	res, _, err := client.Do(context.Background(), getFrom(cfg, "/block"))
+	if err == nil {
+		_ = res.Body.Close()
+		t.Fatalf("the call ended with no error, but the sidecar gave no answer")
+	}
+
+	signer := client.Payer()
+	spent, count := signer.Spent()
+	if spent.String() != "3000" {
+		t.Errorf("spent = %s, want 3000. The payer must count a payment that may be on the chain.", spent)
+	}
+	if count != 1 {
+		t.Errorf("payments = %d, want 1", count)
+	}
+	open := signer.Open()
+	if len(open) != 1 {
+		t.Fatalf("Open() = %v, want 1 hash", open)
+	}
+	if len(open[0]) != 64 {
+		t.Errorf("the hash is %q, want 64 characters", open[0])
+	}
+
+	// NOTE: The transport of Go sends an idempotent request again when the
+	// connection closes before the answer starts, so the sidecar can see
+	// the same payment more than 1 time. The replay guard of the sidecar
+	// stops the second one. The payer signs 1 payment either way.
+	if _, payments := sidecar.counts(); payments < 1 {
+		t.Errorf("the sidecar got %d payments, want at least 1", payments)
+	}
+}
+
+func TestClientGivesAPaymentBackWhenTheSidecarRefusesIt(t *testing.T) {
+	// The sidecar answered, so it broadcast nothing. The money is still in
+	// the wallet, and the payer must give the budget back.
+	client, _, cfg := newTestClient(t, &fakeSidecar{price: "1000", reject: true}, "")
+
+	res, receipt, err := client.Do(context.Background(), getFrom(cfg, "/block"))
+	if err != nil {
+		t.Fatalf("do: %v", err)
+	}
+	defer res.Body.Close()
+	if receipt.Paid {
+		t.Errorf("the receipt says paid, but the sidecar refused the payment")
+	}
+
+	signer := client.Payer()
+	spent, count := signer.Spent()
+	if spent.Sign() != 0 {
+		t.Errorf("spent = %s, want 0", spent)
+	}
+	if count != 0 {
+		t.Errorf("payments = %d, want 0", count)
+	}
+	if open := signer.Open(); len(open) != 0 {
+		t.Errorf("Open() = %v, want nothing. The sidecar answered.", open)
 	}
 }

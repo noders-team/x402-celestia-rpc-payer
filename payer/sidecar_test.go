@@ -20,6 +20,10 @@ type fakeSidecar struct {
 	reject bool
 	// settleFails answers 402 with a failed Payment-Response.
 	settleFails bool
+	// dropPayment closes the connection when the payment arrives, with no
+	// answer. That is a sidecar that broadcast the transaction and then
+	// lost the answer.
+	dropPayment bool
 	// inBodyOnly leaves out the Payment-Required header.
 	inBodyOnly bool
 	// jsonRPCShape puts the payment option in a JSON-RPC error.
@@ -86,6 +90,21 @@ func (s *fakeSidecar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if header == "" {
 		s.sendRequired(w, "payment_required")
+		return
+	}
+
+	if s.dropPayment {
+		// Close the connection with no answer. The payer must not know if
+		// the sidecar broadcast the transaction.
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			panic("the test server does not let a handler close the connection")
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			panic(err)
+		}
+		_ = conn.Close()
 		return
 	}
 
@@ -189,7 +208,7 @@ mnemonic: "` + testMnemonic + `"
 		t.Fatalf("new wallet: %v", err)
 	}
 	chain := &fakeChain{number: 42, sequence: 7}
-	return NewClient(cfg, NewPayer(cfg, wallet, chain.Account), log), sidecar, cfg
+	return NewClient(cfg, NewPayer(cfg, wallet, chain), log), sidecar, cfg
 }
 
 // readBody reads and closes the body of an answer.
