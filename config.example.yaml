@@ -1,0 +1,69 @@
+# x402-celestia-rpc-payer — the payer of an x402 Celestia RPC sidecar.
+#
+# You do not write this file by hand. Run:
+#
+#   x402-celestia-rpc-payer init http://your-sidecar:26658
+#
+# init writes a config.yaml with the 4 fields below the line, and it makes a
+# wallet in .mnemonic. Every other field of this file has a good default, and
+# a config.yaml that leaves it out gets that default.
+#
+# WARNING: .mnemonic holds the key of a wallet that has money, and config.yaml
+# holds it too when you write the mnemonic field below. Both files have the
+# mode 0600, and both are in .gitignore. Keep them there.
+
+# --- the 4 fields that init writes ---------------------------------------
+
+# The x402 sidecar that the payer pays.
+upstream: "http://localhost:26658"
+
+# The chain that the payments use, as a CAIP-2 identifier. It must be the
+# network that the sidecar asks for.
+#   cosmos:celestia   mainnet
+#   cosmos:mocha-5    Mocha testnet
+#
+# This is the only thing that the payer knows about the chain. The payer has no
+# node and no endpoint: it reads the account of the payer from the free
+# /x402/account route of the sidecar.
+network: "cosmos:mocha-5"
+
+# CAUTION: The highest price that the payer pays for 1 call, in utia. The payer
+# refuses a call above it. init takes it from the costliest method of the
+# sidecar. Keep this value low.
+maxPerCall: "20000"
+
+# The highest sum that the payer pays while it runs, in utia. It covers the
+# prices and the fees, because both leave the wallet. "0" removes the limit.
+# The sum starts at 0 again each time the payer starts.
+budget: "0"
+
+# --- the fields that have a default ---------------------------------------
+# Add one of these only to change it.
+
+# The address of the local proxy. Your tools connect here.
+#listen: ":26659"
+
+# A file that holds the BIP-39 mnemonic of the payer wallet. A relative path is
+# read from the directory of this file. init writes .mnemonic.
+#mnemonicFile: ".mnemonic"
+
+# The mnemonic itself. The payer reads mnemonicFile when this is empty.
+#mnemonic: ""
+
+# The only token that the payer pays. The payer refuses a payment option that
+# asks for another token. The fee uses it too, and the chain takes a fee in
+# utia only, so keep this value. TIA has 6 decimals, so 1000 utia is 0.001 TIA.
+#asset: "utia"
+
+# The fee of the payment transaction, in the atomic unit of asset. The fee is
+# not the price. The payer pays it to the validators of the chain.
+#fee: "2000"
+
+# The gas limit of the payment transaction.
+#gasLimit: 100000
+
+# How long a signed payment stays usable, in seconds.
+#timeoutSeconds: 120
+
+# The memo of the payment transaction. Keep it empty.
+#memo: ""

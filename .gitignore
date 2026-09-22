@@ -1,0 +1,26 @@
+# --- secrets. Keep these out of git. ---------------------------------------
+# .mnemonic holds the key of a wallet that has money, and config.yaml holds it
+# too when the mnemonic field is in use.
+.mnemonic
+*.mnemonic
+config.yaml
+
+# --- build output -----------------------------------------------------------
+bin/
+dist/
+
+# The binary that "go build" leaves behind. Both paths are anchored: an
+# unanchored pattern hides the directory cmd/x402-celestia-rpc-payer/ too.
+/x402-celestia-rpc-payer
+/cmd/x402-celestia-rpc-payer/x402-celestia-rpc-payer
+
+# --- Go ---------------------------------------------------------------------
+*.test
+*.out
+coverage.txt
+
+# --- editors and operating systems ------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp

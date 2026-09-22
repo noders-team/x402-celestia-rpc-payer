@@ -1,0 +1,25 @@
+# WARNING: These files hold the key of a wallet that has money. Keep them out
+# of the build context. "COPY . ." takes every file that is not named here.
+.mnemonic
+*.mnemonic
+config.yaml
+
+# Build output. The image builds the binary itself.
+bin/
+dist/
+/x402-celestia-rpc-payer
+coverage.txt
+*.test
+*.out
+
+# Files that the build does not read.
+.git/
+.github/
+.gitignore
+.golangci.yml
+*.md
+Makefile
+Dockerfile
+.DS_Store
+.idea/
+.vscode/
