@@ -1,0 +1,121 @@
+name: Release
+
+# A final release tag (vX.Y.Z) promotes the tested RC image to prod. It does
+# NOT rebuild: it adds the release tags to the SAME image digest that the
+# release candidate built and tested on stage (build once, deploy many).
+#
+# The final tag and the approved RC tag must point to the same commit, so the
+# image tagged sha-<commit> exists. If it does not, this workflow stops.
+#
+# See docs/RELEASE.md for the complete flow.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write   # create the GitHub Release
+  packages: write   # add the release tags to the image
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    name: Promote the RC image to the release
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.ref.outputs.image }}
+      source: ${{ steps.ref.outputs.source }}
+    steps:
+      - name: Refuse an rc tag
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            *-rc.*)
+              echo "This workflow is for a final release tag, not an rc tag."
+              exit 1
+              ;;
+          esac
+
+      - name: Set the image references
+        id: ref
+        run: |
+          repo="${REGISTRY}/${IMAGE_NAME,,}"
+          {
+            echo "repo=${repo}"
+            echo "source=${repo}:sha-${GITHUB_SHA::12}"
+            echo "image=${repo}:${GITHUB_REF_NAME}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check that a tested RC image exists for this commit
+        run: |
+          if ! docker buildx imagetools inspect "${{ steps.ref.outputs.source }}" >/dev/null 2>&1; then
+            echo "No tested image ${{ steps.ref.outputs.source }} for this commit."
+            echo "A final release must promote an approved release candidate."
+            echo "Create and test vX.Y.Z-rc.N on this commit first."
+            exit 1
+          fi
+
+      - name: Add the release tags to the same digest
+        run: |
+          docker buildx imagetools create \
+            --tag "${{ steps.ref.outputs.image }}" \
+            --tag "${{ steps.ref.outputs.repo }}:latest" \
+            "${{ steps.ref.outputs.source }}"
+
+  deploy-prod:
+    name: Deploy to prod
+    needs: promote
+    runs-on: ubuntu-latest
+    environment:
+      name: prod
+    steps:
+      - name: Show the image to deploy
+        run: |
+          echo "Deploy the release image to prod."
+          echo "  image: ${{ needs.promote.outputs.image }}"
+
+      - name: Deploy
+        run: |
+          # TODO: put the real prod deploy command here.
+          #
+          # Add a required reviewer to the "prod" environment in the repository
+          # settings to make this a manual gate. Remove the reviewer to make the
+          # prod deploy automatic.
+          #
+          # Deploy the same digest that stage tested:
+          #   ${{ needs.promote.outputs.source }}
+          echo "Add the prod deploy command here."
+
+  github-release:
+    name: Create the GitHub Release
+    needs: promote
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --latest

@@ -4,7 +4,7 @@
 #
 # The build context is this directory. The module has no private dependency,
 # so the build needs no credentials.
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 
 WORKDIR /src
 
