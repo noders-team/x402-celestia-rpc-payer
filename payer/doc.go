@@ -4,8 +4,10 @@
 //
 //   - Config reads and checks the YAML configuration file.
 //   - Wallet derives the key of a BIP-39 mnemonic and signs with it.
-//   - Accounts reads the account number and the sequence of the payer from the
-//     free /x402/account route of the sidecar.
+//   - Accounts reads what the payer needs from the sidecar: the account
+//     number and the sequence, on the free /x402/account route, and the state
+//     of a transaction, on the free /x402/tx route. It is the Chain of the
+//     Payer.
 //   - Payer signs 1 bank MsgSend for 1 payment option. It does not broadcast
 //     the transaction: the sidecar broadcasts it after it verifies it.
 //   - Client sends a request to the sidecar. When the sidecar answers 402, the
@@ -17,7 +19,7 @@
 //	cfg, err := payer.LoadConfig("config.yaml")
 //	wallet, err := payer.WalletFromConfig(cfg)
 //	accounts := payer.NewAccounts(cfg.Upstream, cfg.Network)
-//	p := payer.NewPayer(cfg, wallet, accounts.Account)
+//	p := payer.NewPayer(cfg, wallet, accounts)
 //	client := payer.NewClient(cfg, p, log)
 //	http.ListenAndServe(cfg.Listen, payer.NewProxy(cfg, client, log))
 //

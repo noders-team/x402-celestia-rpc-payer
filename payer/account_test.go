@@ -200,3 +200,130 @@ func TestAccountsNameAWalletThatTheChainDoesNotHold(t *testing.T) {
 		})
 	}
 }
+
+// --- the transaction route -------------------------------------------------
+
+// txHandler answers the transaction route with a fixed body.
+func txHandler(t *testing.T, status int, body string) (*httptest.Server, *string) {
+	t.Helper()
+	asked := new(string)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != txRoute {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		*asked = r.URL.Query().Get("hash")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return server, asked
+}
+
+const testHash = "1A2B3C4D5E6F78901A2B3C4D5E6F78901A2B3C4D5E6F78901A2B3C4D5E6F7890"
+
+func TestTxStatusReadsATransactionInABlock(t *testing.T) {
+	body := `{"hash":"` + testHash + `","network":"cosmos:mocha-5",` +
+		`"found":true,"height":"123456","code":0}`
+	server, asked := txHandler(t, http.StatusOK, body)
+
+	status, err := NewAccounts(server.URL, "cosmos:mocha-5").TxStatus(context.Background(), testHash)
+	if err != nil {
+		t.Fatalf("tx status: %v", err)
+	}
+	if !status.Found {
+		t.Errorf("found = false, want true")
+	}
+	if status.Height != 123456 {
+		t.Errorf("height = %d, want 123456", status.Height)
+	}
+	if status.Code != 0 {
+		t.Errorf("code = %d, want 0", status.Code)
+	}
+	if *asked != testHash {
+		t.Errorf("the payer asked for %q, want %q", *asked, testHash)
+	}
+}
+
+func TestTxStatusReadsATransactionThatTheChainRejected(t *testing.T) {
+	body := `{"hash":"` + testHash + `","found":true,"height":"99",` +
+		`"code":5,"error":"insufficient funds"}`
+	server, _ := txHandler(t, http.StatusOK, body)
+
+	status, err := NewAccounts(server.URL, "cosmos:mocha-5").TxStatus(context.Background(), testHash)
+	if err != nil {
+		t.Fatalf("tx status: %v", err)
+	}
+	if !status.Found {
+		t.Errorf("found = false, want true. A rejected transaction is in a block.")
+	}
+	if status.Code != 5 {
+		t.Errorf("code = %d, want 5", status.Code)
+	}
+	if !strings.Contains(status.Error, "insufficient funds") {
+		t.Errorf("error = %q, want the log of the chain", status.Error)
+	}
+}
+
+func TestTxStatusReadsATransactionThatTheChainDoesNotHold(t *testing.T) {
+	body := `{"hash":"` + testHash + `","found":false,"height":"0","code":0}`
+	server, _ := txHandler(t, http.StatusOK, body)
+
+	status, err := NewAccounts(server.URL, "cosmos:mocha-5").TxStatus(context.Background(), testHash)
+	if err != nil {
+		t.Fatalf("tx status: %v", err)
+	}
+	if status.Found {
+		t.Errorf("found = true, but the chain holds no such transaction")
+	}
+	if status.Height != 0 {
+		t.Errorf("height = %d, want 0", status.Height)
+	}
+}
+
+func TestTxStatusReportsASidecarThatHasNoRoute(t *testing.T) {
+	// An older sidecar answers 404 with no message, because the route is
+	// not there at all.
+	server, _ := txHandler(t, http.StatusNotFound, "")
+	// The handler answers 404 only for another path, so ask for one.
+	accounts := NewAccounts(server.URL, "cosmos:mocha-5")
+	accounts.upstream = server.URL + "/nowhere"
+
+	_, err := accounts.TxStatus(context.Background(), testHash)
+	if err == nil {
+		t.Fatalf("the answer was accepted, but the sidecar has no route")
+	}
+	if !strings.Contains(err.Error(), txRoute) {
+		t.Errorf("error = %q, want it to name %s", err, txRoute)
+	}
+}
+
+func TestTxStatusReportsASidecarThatDoesNotAnswer(t *testing.T) {
+	accounts := NewAccounts("http://127.0.0.1:1", "cosmos:mocha-5")
+
+	_, err := accounts.TxStatus(context.Background(), testHash)
+	if err == nil {
+		t.Fatalf("the call ended with no error, but the sidecar is down")
+	}
+	if !strings.Contains(err.Error(), "did not answer") {
+		t.Errorf("error = %q, want it to say that the sidecar did not answer", err)
+	}
+}
+
+func TestTxStatusReportsABodyThatIsNotReadable(t *testing.T) {
+	server, _ := txHandler(t, http.StatusOK, "not json")
+
+	_, err := NewAccounts(server.URL, "cosmos:mocha-5").TxStatus(context.Background(), testHash)
+	if err == nil {
+		t.Fatalf("the body was accepted, but it is not JSON")
+	}
+	if !strings.Contains(err.Error(), "not readable") {
+		t.Errorf("error = %q, want it to say that the answer is not readable", err)
+	}
+}
+
+func TestAccountsSatisfiesChain(*testing.T) {
+	// The Payer takes a Chain. The sidecar reader must be one.
+	var _ Chain = NewAccounts("http://localhost:26658", "cosmos:mocha-5")
+}

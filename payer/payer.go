@@ -2,7 +2,9 @@ package payer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -34,8 +36,30 @@ type AccountInfo struct {
 	Sequence uint64
 }
 
-// AccountFunc reads the account of an address from a chain.
-type AccountFunc func(ctx context.Context, address string) (AccountInfo, error)
+// TxStatus is what the chain knows about 1 transaction.
+type TxStatus struct {
+	// Found is true when the chain holds the transaction in a block.
+	Found bool
+	// Height is the block of the transaction. It is 0 when Found is false.
+	Height int64
+	// Code is the result code of the chain. 0 means that the payment moved.
+	// Another value means that the chain took the fee and the account
+	// sequence, and that the payment did not move.
+	Code uint32
+	// Error is the log of a transaction whose Code is not 0.
+	Error string
+}
+
+// Chain is what the Payer must read before and after it signs.
+//
+// The payer has no node of its own, so the sidecar answers both calls, on its
+// free routes /x402/account and /x402/tx. Tests replace it.
+type Chain interface {
+	// Account returns the account number and the sequence of an address.
+	Account(ctx context.Context, address string) (AccountInfo, error)
+	// TxStatus reports what the chain knows about a transaction hash.
+	TxStatus(ctx context.Context, hash string) (TxStatus, error)
+}
 
 // Payment is 1 signed payment that the payer made.
 type Payment struct {
@@ -50,10 +74,33 @@ type Payment struct {
 	Asset string
 	// Sequence is the account sequence of the transaction.
 	Sequence uint64
-	// TxHash is empty. The sidecar broadcasts the transaction, so only the
-	// sidecar knows the hash.
+	// TxHash is the hash of the signed transaction. The payer computes it
+	// from the bytes that it signed, so it knows the hash before the sidecar
+	// broadcasts them. Unresolved uses it to ask the chain.
 	TxHash string
 }
+
+const (
+	// defaultResolveWait is how long Pay waits to learn if the chain took a
+	// payment whose answer did not arrive. A Celestia block takes about
+	// 6 s, so this covers 2 blocks.
+	defaultResolveWait = 12 * time.Second
+	// defaultResolveInterval is how often Pay asks the chain in that time.
+	defaultResolveInterval = 2 * time.Second
+)
+
+// txOutcome is what the chain said about a transaction.
+type txOutcome int
+
+const (
+	// txUnknown means that the chain did not answer. The payer cannot tell.
+	txUnknown txOutcome = iota
+	// txAbsent means that the chain answered, and that it holds no such
+	// transaction.
+	txAbsent
+	// txInBlock means that the chain holds the transaction in a block.
+	txInBlock
+)
 
 // Payer signs the payments.
 //
@@ -67,26 +114,38 @@ type Payer struct {
 	cdc      codec.Codec
 	txConfig client.TxConfig
 
-	// account reads the account of the payer. Tests replace it.
-	account AccountFunc
+	// chain reads the account and the state of a transaction. Tests replace
+	// it.
+	chain Chain
 
 	mu      sync.Mutex
 	nextSeq uint64
 	haveSeq bool
 	spent   *big.Int
 	count   int
+	// open holds each payment whose answer did not reach the payer. The
+	// Payer counts them against the budget, and it asks the chain about
+	// them on the next payment.
+	open []*Payment
+
+	// resolveWait and resolveInterval time the question to the chain about
+	// an open payment. Tests make them short.
+	resolveWait     time.Duration
+	resolveInterval time.Duration
 }
 
 // NewPayer builds a Payer for a wallet.
-func NewPayer(cfg *Config, wallet *Wallet, account AccountFunc) *Payer {
+func NewPayer(cfg *Config, wallet *Wallet, chain Chain) *Payer {
 	cdc := newCodec()
 	return &Payer{
-		cfg:      cfg,
-		wallet:   wallet,
-		cdc:      cdc,
-		txConfig: authtx.NewTxConfig(cdc, authtx.DefaultSignModes),
-		account:  account,
-		spent:    new(big.Int),
+		cfg:             cfg,
+		wallet:          wallet,
+		cdc:             cdc,
+		txConfig:        authtx.NewTxConfig(cdc, authtx.DefaultSignModes),
+		chain:           chain,
+		spent:           new(big.Int),
+		resolveWait:     defaultResolveWait,
+		resolveInterval: defaultResolveInterval,
 	}
 }
 
@@ -132,11 +191,15 @@ func (p *Payer) Pay(ctx context.Context, option x402.PaymentOption) (*Payment, e
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// Ask the chain about each payment whose answer did not arrive, before
+	// this payment counts against the budget and picks a sequence.
+	p.resolveOpen(ctx)
+
 	if err := p.checkBudget(amount, fee); err != nil {
 		return nil, err
 	}
 
-	account, err := p.account(ctx, p.wallet.Address())
+	account, err := p.chain.Account(ctx, p.wallet.Address())
 	if err != nil {
 		return nil, fmt.Errorf("read the account of %s: %w", p.wallet.Address(), err)
 	}
@@ -148,7 +211,7 @@ func (p *Payer) Pay(ctx context.Context, option x402.PaymentOption) (*Payment, e
 
 	timeoutAt := time.Now().Add(time.Duration(p.cfg.TimeoutSeconds) * time.Second).Unix()
 
-	signedTx, err := p.signTx(ctx, option, amount, fee, account.Number, sequence)
+	signedTx, txHash, err := p.signTx(ctx, option, amount, fee, account.Number, sequence)
 	if err != nil {
 		return nil, err
 	}
@@ -183,17 +246,66 @@ func (p *Payer) Pay(ctx context.Context, option x402.PaymentOption) (*Payment, e
 		Fee:      fee,
 		Asset:    option.Asset,
 		Sequence: sequence,
+		TxHash:   txHash,
 	}, nil
 }
 
-// Rollback takes a payment back. Call it when the sidecar did not accept the
-// payment. The Payer reads the sequence of the chain again on the next call.
+// Rollback takes a payment back.
+//
+// Call it when the sidecar answered and refused the payment. The sidecar
+// broadcast nothing in that case, so the money is still in the wallet. The
+// Payer reads the sequence of the chain again on the next call.
+//
+// CAUTION: Do not call Rollback when the answer of the sidecar did not
+// arrive. The sidecar may have broadcast the transaction. Call Unresolved.
 func (p *Payer) Rollback(pay *Payment) {
 	if pay == nil {
 		return
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.release(pay)
+}
+
+// Unresolved records a payment whose answer did not reach the payer.
+//
+// The sidecar may have broadcast the transaction before the answer went
+// missing, so the money may be gone. The Payer therefore keeps the price, the
+// fee and the account sequence, and it asks the chain on the next payment.
+//
+// That order is the safe one. It counts money that may still be in the
+// wallet, so the budget stops early and never late. And it never signs a
+// sequence that the chain already holds.
+func (p *Payer) Unresolved(pay *Payment) {
+	if pay == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if pay.TxHash == "" {
+		// Without a hash the Payer cannot ask the chain, so it gives the
+		// payment back.
+		p.release(pay)
+		return
+	}
+	p.open = append(p.open, pay)
+}
+
+// Open returns the hash of each payment whose answer did not arrive, and
+// which the Payer has not resolved yet.
+func (p *Payer) Open() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	hashes := make([]string, 0, len(p.open))
+	for _, pay := range p.open {
+		hashes = append(hashes, pay.TxHash)
+	}
+	return hashes
+}
+
+// release gives a payment back: the price, the fee, the count, and the
+// account sequence. The caller holds the lock.
+func (p *Payer) release(pay *Payment) {
 	p.haveSeq = false
 	// Take back the price and the fee, which is what Pay counted.
 	if pay.Amount != nil {
@@ -203,6 +315,72 @@ func (p *Payer) Rollback(pay *Payment) {
 		p.spent.Sub(p.spent, pay.Fee)
 	}
 	p.count--
+}
+
+// resolveOpen asks the chain about each payment whose answer did not arrive.
+//
+// A payment that reached a block stands: the money left the wallet, and the
+// chain holds the account sequence. A payment that the chain does not hold
+// goes back. A chain that does not answer leaves the payment open, and the
+// Payer asks again on the next payment.
+//
+// The caller holds the lock.
+func (p *Payer) resolveOpen(ctx context.Context) {
+	if len(p.open) == 0 {
+		return
+	}
+
+	keep := p.open[:0]
+	for _, pay := range p.open {
+		outcome, status := p.waitForTx(ctx, pay.TxHash)
+		switch outcome {
+		case txUnknown:
+			keep = append(keep, pay)
+		case txAbsent:
+			p.release(pay)
+		case txInBlock:
+			if status.Code != 0 {
+				// The chain took the fee and the account sequence. The
+				// payment did not move, so give the price back. The
+				// sequence stays, because the chain holds it.
+				if pay.Amount != nil {
+					p.spent.Sub(p.spent, pay.Amount)
+				}
+			}
+		}
+	}
+	p.open = keep
+}
+
+// waitForTx asks the chain about a hash until the chain holds the transaction
+// in a block, or until the time limit ends.
+//
+// A transaction needs a block, so the first answer is often "not there". This
+// function therefore waits for about 2 blocks before it reports txAbsent.
+func (p *Payer) waitForTx(ctx context.Context, hash string) (txOutcome, TxStatus) {
+	deadline := time.Now().Add(p.resolveWait)
+	outcome := txUnknown
+
+	for {
+		status, err := p.chain.TxStatus(ctx, hash)
+		if err == nil {
+			if status.Found {
+				return txInBlock, status
+			}
+			// The chain answered, and it holds no such transaction. That
+			// answer counts only after the time limit, because a
+			// transaction that waits for a block gives the same answer.
+			outcome = txAbsent
+		}
+		if ctx.Err() != nil || !time.Now().Before(deadline) {
+			return outcome, TxStatus{}
+		}
+		select {
+		case <-ctx.Done():
+			return outcome, TxStatus{}
+		case <-time.After(p.resolveInterval):
+		}
+	}
 }
 
 // checkOption checks the payment option of the sidecar against the rules of
@@ -268,8 +446,11 @@ func (p *Payer) feeAmount() (*big.Int, error) {
 }
 
 // signTx builds a bank MsgSend and signs it with SIGN_MODE_DIRECT.
-// It returns the base64 of the signed TxRaw.
-func (p *Payer) signTx(ctx context.Context, option x402.PaymentOption, amount, fee *big.Int, accountNumber, sequence uint64) (string, error) {
+//
+// It returns the base64 of the signed TxRaw, and the hash of the same bytes.
+// A Cosmos chain names a transaction by the SHA-256 of those bytes, so the
+// payer knows the hash before the sidecar broadcasts the transaction.
+func (p *Payer) signTx(ctx context.Context, option x402.PaymentOption, amount, fee *big.Int, accountNumber, sequence uint64) (signedTx, txHash string, err error) {
 	coin := sdk.NewCoin(option.Asset, math.NewIntFromBigInt(amount))
 
 	builder := p.txConfig.NewTxBuilder()
@@ -280,7 +461,7 @@ func (p *Payer) signTx(ctx context.Context, option x402.PaymentOption, amount, f
 		Amount: sdk.Coins{coin},
 	}
 	if err := builder.SetMsgs(msg); err != nil {
-		return "", fmt.Errorf("set the message: %w", err)
+		return "", "", fmt.Errorf("set the message: %w", err)
 	}
 	builder.SetGasLimit(p.cfg.GasLimit)
 	builder.SetFeeAmount(sdk.NewCoins(sdk.NewCoin(p.cfg.Asset, math.NewIntFromBigInt(fee))))
@@ -296,7 +477,7 @@ func (p *Payer) signTx(ctx context.Context, option x402.PaymentOption, amount, f
 		Sequence: sequence,
 	}
 	if err := builder.SetSignatures(blank); err != nil {
-		return "", fmt.Errorf("set the empty signature: %w", err)
+		return "", "", fmt.Errorf("set the empty signature: %w", err)
 	}
 
 	// GetSignBytesAdapter builds the same bytes that the ante handler of the
@@ -311,12 +492,12 @@ func (p *Payer) signTx(ctx context.Context, option x402.PaymentOption, amount, f
 	signBytes, err := authsigning.GetSignBytesAdapter(
 		ctx, p.txConfig.SignModeHandler(), mode, signerData, builder.GetTx())
 	if err != nil {
-		return "", fmt.Errorf("build the sign bytes: %w", err)
+		return "", "", fmt.Errorf("build the sign bytes: %w", err)
 	}
 
 	signature, err := p.wallet.Sign(signBytes)
 	if err != nil {
-		return "", fmt.Errorf("sign the payment: %w", err)
+		return "", "", fmt.Errorf("sign the payment: %w", err)
 	}
 
 	signed := signingtypes.SignatureV2{
@@ -325,14 +506,16 @@ func (p *Payer) signTx(ctx context.Context, option x402.PaymentOption, amount, f
 		Sequence: sequence,
 	}
 	if err := builder.SetSignatures(signed); err != nil {
-		return "", fmt.Errorf("set the signature: %w", err)
+		return "", "", fmt.Errorf("set the signature: %w", err)
 	}
 
 	txBytes, err := p.txConfig.TxEncoder()(builder.GetTx())
 	if err != nil {
-		return "", fmt.Errorf("encode the transaction: %w", err)
+		return "", "", fmt.Errorf("encode the transaction: %w", err)
 	}
-	return base64.StdEncoding.EncodeToString(txBytes), nil
+	sum := sha256.Sum256(txBytes)
+	return base64.StdEncoding.EncodeToString(txBytes),
+		strings.ToUpper(hex.EncodeToString(sum[:])), nil
 }
 
 // mustJSON encodes a value that cannot fail to encode.

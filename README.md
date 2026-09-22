@@ -147,7 +147,7 @@ The proxy carries every path to the sidecar. It owns the `/x402/payer/` prefix:
 | Route | What it gives |
 |---|---|
 | `GET /x402/payer/health` | the state of the proxy |
-| `GET /x402/payer/status` | the address of the payer, the sum that it paid, and the limits |
+| `GET /x402/payer/status` | the address of the payer, the sum that it paid, the limits, and each payment that it cannot resolve |
 
 `/x402/health` and `/x402/prices` go to the sidecar, which answers them.
 
@@ -289,7 +289,54 @@ payment. The price, the token and the recipient come from the checks of the
 payer, not from this answer.
 
 CAUTION: The payer needs a sidecar with the `/x402/account` route. A sidecar
-without it cannot tell the payer what to sign.
+without it cannot tell the payer what to sign. It needs the `/x402/tx` route
+too. The section [A lost answer](#a-lost-answer) says why.
+
+## A lost answer
+
+The payer signs a payment, and the sidecar broadcasts it. Between those 2
+steps the answer can go missing: the connection breaks, the sidecar stops, or
+the time limit ends the wait. The payer then does not know if the chain took
+the money.
+
+The payer must not guess. A wrong guess costs 2 things:
+
+- **The budget.** If the payer takes the payment back and the chain kept it,
+  the budget counts less than the wallet spent, and it stops too late.
+- **The account sequence.** The sequence is part of the signed bytes. If the
+  payer takes the sequence back and the chain kept it, the next payment signs
+  a sequence that the chain already holds, and the chain rejects it.
+
+So the payer asks the chain. It computes the hash of the bytes that it signs,
+which is what names a transaction on a Cosmos chain. After a lost answer it
+keeps the payment open, and it reads the free `GET /x402/tx` route of the
+sidecar before it signs the next payment.
+
+| What the chain says | What the payer does |
+|---|---|
+| The transaction is in a block, and its code is 0 | The payment stands. The money left, and the chain holds the sequence. |
+| The transaction is in a block, and its code is not 0 | The fee left, and the payment did not move. The payer gives the price back and keeps the sequence. |
+| The chain holds no such transaction | Nothing left the wallet. The payer gives the price and the fee back, and it reads the sequence of the chain again. |
+| The sidecar does not answer | The payer cannot tell. It keeps the payment against the budget, and it asks again on the next payment. |
+
+A transaction needs a block, so the first answer of the chain is often "not
+there". The payer therefore asks for about 2 blocks before it decides that
+the chain holds nothing. That wait happens 1 time, after a lost answer.
+
+`GET /x402/payer/status` names each open payment in its `unresolved` field:
+
+```json
+{
+  "payer": "celestia1…",
+  "spent": "6000",
+  "payments": 2,
+  "unresolved": ["1A2B3C…"]
+}
+```
+
+CAUTION: The payer needs a sidecar with the `/x402/tx` route. An older
+sidecar gives no answer there, so each lost payment stays open and counts
+against the budget until the payer stops.
 
 ## Use it as a Go library
 
@@ -327,7 +374,7 @@ func main() {
 	}
 
 	accounts := payer.NewAccounts(cfg.Upstream, cfg.Network)
-	signer := payer.NewPayer(cfg, wallet, accounts.Account)
+	signer := payer.NewPayer(cfg, wallet, accounts)
 	client := payer.NewClient(cfg, signer, slog.Default())
 
 	// 1 paid call.
@@ -371,12 +418,11 @@ of the chain uses.
 
 ## Known limits
 
-- **A lost answer can make the payer use 1 account sequence 2 times.** When the
-  sidecar broadcasts a payment and the answer does not reach the payer, the
-  payer takes the payment back. The chain keeps it. The next payment then uses
-  a sequence that the chain already holds, and the budget counts less than the
-  wallet spent. The fix needs a query of the chain.
 - The proxy does not carry `/websocket`.
+- A payment that the payer cannot resolve, because the sidecar stays down,
+  counts against the budget until the payer stops. That is the safe
+  direction: the budget ends early, and never late. The section
+  [A lost answer](#a-lost-answer) says more.
 
 ## Contributing
 

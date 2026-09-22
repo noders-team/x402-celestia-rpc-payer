@@ -75,6 +75,25 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 Dependabot opens a pull request for a new version of a dependency each week.
 
+## A lost answer
+
+The payer signs a payment, and the sidecar broadcasts it. When the answer does
+not reach the payer, the payer does not know if the chain took the money.
+
+The payer keeps the payment against the budget until it learns the answer. It
+asks the free `GET /x402/tx` route of the sidecar, with the hash of the bytes
+that it signed, before it signs the next payment. A payment that reached a
+block stands. A payment that the chain does not hold goes back.
+
+NOTE: A sidecar that gives a wrong answer on that route cannot take money. It
+can only make the payer count the budget wrong, or pick an account sequence
+that the chain rejects. The chain, not the sidecar, decides what a signature
+buys.
+
+CAUTION: While the payer cannot reach the sidecar, each open payment counts
+against the budget. The budget therefore stops early, and never late. The
+README says more in the section "A lost answer".
+
 ## Keep the wallet small
 
 Put in the wallet the money of 1 day of calls, and no more. A `budget` in the

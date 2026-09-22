@@ -2,10 +2,15 @@ package payer
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	txn "github.com/cosmos/cosmos-sdk/types/tx"
@@ -18,12 +23,24 @@ import (
 // testPayTo is a real Celestia address. It is the test mnemonic at index 9.
 const testPayTo = "celestia1kpr42yd4753cymc24ps78cm8dqf203qp0zwlgt"
 
-// fakeChain is an AccountFunc that answers from memory.
+// fakeChain is a Chain that answers from memory.
 type fakeChain struct {
 	number   uint64
 	sequence uint64
 	err      error
 	calls    int
+
+	// mu guards the transaction fields, because waitForTx reads them from
+	// the goroutine of the test while the test writes them.
+	mu sync.Mutex
+	// txFound, txCode and txError are the answer of TxStatus. txErr
+	// replaces it with an error, which is a sidecar that does not answer.
+	txFound bool
+	txCode  uint32
+	txError string
+	txErr   error
+	txCalls int
+	txHash  string
 }
 
 func (f *fakeChain) Account(context.Context, string) (AccountInfo, error) {
@@ -32,6 +49,34 @@ func (f *fakeChain) Account(context.Context, string) (AccountInfo, error) {
 		return AccountInfo{}, f.err
 	}
 	return AccountInfo{Number: f.number, Sequence: f.sequence}, nil
+}
+
+func (f *fakeChain) TxStatus(_ context.Context, hash string) (TxStatus, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.txCalls++
+	f.txHash = hash
+	if f.txErr != nil {
+		return TxStatus{}, f.txErr
+	}
+	if !f.txFound {
+		return TxStatus{}, nil
+	}
+	return TxStatus{Found: true, Height: 100, Code: f.txCode, Error: f.txError}, nil
+}
+
+// setTx changes the answer of TxStatus while a test runs.
+func (f *fakeChain) setTx(found bool, code uint32, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.txFound, f.txCode, f.txErr = found, code, err
+}
+
+// txCount returns the number of TxStatus calls.
+func (f *fakeChain) txCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.txCalls
 }
 
 // newTestPayer builds a payer with a fake chain.
@@ -47,7 +92,11 @@ func newTestPayer(t *testing.T, body string) (*Payer, *fakeChain) {
 		t.Fatalf("new wallet: %v", err)
 	}
 	chain := &fakeChain{number: 42, sequence: 7}
-	return NewPayer(cfg, wallet, chain.Account), chain
+	p := NewPayer(cfg, wallet, chain)
+	// The tests must not wait for a block.
+	p.resolveWait = 20 * time.Millisecond
+	p.resolveInterval = 2 * time.Millisecond
+	return p, chain
 }
 
 // testOption is the payment option that a sidecar publishes.
@@ -463,5 +512,236 @@ func TestPayerReportsAChainError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read the account") {
 		t.Errorf("error = %q, want it to hold \"read the account\"", err)
+	}
+}
+
+// --- a payment whose answer did not arrive ---------------------------------
+
+// payOnce signs 1 payment of 1000 utia and fails the test if it cannot.
+func payOnce(t *testing.T, p *Payer) *Payment {
+	t.Helper()
+	pay, err := p.Pay(context.Background(), testOption("1000"))
+	if err != nil {
+		t.Fatalf("pay: %v", err)
+	}
+	return pay
+}
+
+func TestPayGivesTheHashOfTheBytesThatItSigned(t *testing.T) {
+	p, _ := newTestPayer(t, minimalConfig)
+
+	pay := payOnce(t, p)
+
+	if len(pay.TxHash) != 64 {
+		t.Fatalf("the hash is %d characters, want 64: %q", len(pay.TxHash), pay.TxHash)
+	}
+	if pay.TxHash != strings.ToUpper(pay.TxHash) {
+		t.Errorf("the hash is not uppercase: %q", pay.TxHash)
+	}
+
+	// A Cosmos chain names a transaction by the SHA-256 of the bytes that
+	// the payer broadcasts. Compute it again from the header.
+	_, cosmos := decodePayment(t, pay.Header)
+	txBytes, err := base64.StdEncoding.DecodeString(cosmos.SignedTx)
+	if err != nil {
+		t.Fatalf("decode the transaction: %v", err)
+	}
+	sum := sha256.Sum256(txBytes)
+	want := strings.ToUpper(hex.EncodeToString(sum[:]))
+	if pay.TxHash != want {
+		t.Errorf("hash = %q, want %q", pay.TxHash, want)
+	}
+}
+
+func TestUnresolvedKeepsThePaymentAgainstTheBudget(t *testing.T) {
+	// The sidecar may have broadcast the transaction, so the money may be
+	// gone. The payer must not give the budget back.
+	p, _ := newTestPayer(t, minimalConfig)
+
+	pay := payOnce(t, p)
+	spentBefore, countBefore := p.Spent()
+
+	p.Unresolved(pay)
+
+	spent, count := p.Spent()
+	if spent.Cmp(spentBefore) != 0 {
+		t.Errorf("spent = %s, want %s. Unresolved must not give the budget back.", spent, spentBefore)
+	}
+	if count != countBefore {
+		t.Errorf("payments = %d, want %d", count, countBefore)
+	}
+	if open := p.Open(); len(open) != 1 || open[0] != pay.TxHash {
+		t.Errorf("Open() = %v, want the hash %q", open, pay.TxHash)
+	}
+}
+
+func TestResolveKeepsAPaymentThatReachedABlock(t *testing.T) {
+	p, chain := newTestPayer(t, minimalConfig)
+
+	first := payOnce(t, p)
+	p.Unresolved(first)
+	chain.setTx(true, 0, nil)
+
+	second := payOnce(t, p)
+
+	if open := p.Open(); len(open) != 0 {
+		t.Errorf("Open() = %v, want nothing. The chain holds the transaction.", open)
+	}
+	spent, count := p.Spent()
+	if spent.String() != "6000" {
+		t.Errorf("spent = %s, want 6000. Both payments stand.", spent)
+	}
+	if count != 2 {
+		t.Errorf("payments = %d, want 2", count)
+	}
+	// The chain holds sequence 7, so the second payment must take 8.
+	if second.Sequence != 8 {
+		t.Errorf("sequence = %d, want 8", second.Sequence)
+	}
+	if chain.txHash != first.TxHash {
+		t.Errorf("the payer asked for %q, want %q", chain.txHash, first.TxHash)
+	}
+}
+
+func TestResolveGivesAPaymentBackWhenTheChainDoesNotHoldIt(t *testing.T) {
+	p, chain := newTestPayer(t, minimalConfig)
+
+	first := payOnce(t, p)
+	p.Unresolved(first)
+	chain.setTx(false, 0, nil)
+
+	second := payOnce(t, p)
+
+	if open := p.Open(); len(open) != 0 {
+		t.Errorf("Open() = %v, want nothing", open)
+	}
+	spent, count := p.Spent()
+	if spent.String() != "3000" {
+		t.Errorf("spent = %s, want 3000. The lost payment goes back.", spent)
+	}
+	if count != 1 {
+		t.Errorf("payments = %d, want 1", count)
+	}
+	// The payment never reached the chain, so the sequence of the chain is
+	// the right one.
+	if second.Sequence != 7 {
+		t.Errorf("sequence = %d, want 7", second.Sequence)
+	}
+}
+
+func TestResolveGivesThePriceBackWhenTheChainRejectedTheTransaction(t *testing.T) {
+	// A result code that is not 0 means that the chain took the fee and the
+	// account sequence, and that the payment did not move.
+	p, chain := newTestPayer(t, minimalConfig)
+
+	first := payOnce(t, p)
+	p.Unresolved(first)
+	chain.setTx(true, 5, nil)
+
+	second := payOnce(t, p)
+
+	spent, count := p.Spent()
+	// 1000 + 2000 for the second payment, plus the 2000 fee of the first.
+	if spent.String() != "5000" {
+		t.Errorf("spent = %s, want 5000. The fee stays, the price goes back.", spent)
+	}
+	if count != 2 {
+		t.Errorf("payments = %d, want 2", count)
+	}
+	// The chain holds the sequence, so the next payment must not take it.
+	if second.Sequence != 8 {
+		t.Errorf("sequence = %d, want 8", second.Sequence)
+	}
+}
+
+func TestResolveKeepsThePaymentOpenWhenTheChainDoesNotAnswer(t *testing.T) {
+	// The payer cannot tell, so it keeps the payment against the budget and
+	// keeps the sequence. Both are the safe direction.
+	p, chain := newTestPayer(t, minimalConfig)
+
+	first := payOnce(t, p)
+	p.Unresolved(first)
+	chain.setTx(false, 0, errors.New("the sidecar did not answer"))
+
+	second := payOnce(t, p)
+
+	if open := p.Open(); len(open) != 1 || open[0] != first.TxHash {
+		t.Errorf("Open() = %v, want the hash %q", open, first.TxHash)
+	}
+	spent, _ := p.Spent()
+	if spent.String() != "6000" {
+		t.Errorf("spent = %s, want 6000. The payer counts a payment that it cannot check.", spent)
+	}
+	if second.Sequence != 8 {
+		t.Errorf("sequence = %d, want 8", second.Sequence)
+	}
+
+	// The next payment asks again, and now the chain answers.
+	chain.setTx(true, 0, nil)
+	_ = payOnce(t, p)
+	if open := p.Open(); len(open) != 0 {
+		t.Errorf("Open() = %v, want nothing after the chain answered", open)
+	}
+}
+
+func TestResolveAsksTheChainMoreThan1Time(t *testing.T) {
+	// A transaction needs a block, so the first answer is often "not there".
+	p, chain := newTestPayer(t, minimalConfig)
+
+	first := payOnce(t, p)
+	p.Unresolved(first)
+	chain.setTx(false, 0, nil)
+
+	_ = payOnce(t, p)
+
+	if calls := chain.txCount(); calls < 2 {
+		t.Errorf("the payer asked %d time(s), want more than 1", calls)
+	}
+}
+
+func TestUnresolvedWithoutAHashGivesThePaymentBack(t *testing.T) {
+	p, _ := newTestPayer(t, minimalConfig)
+
+	pay := payOnce(t, p)
+	pay.TxHash = ""
+	p.Unresolved(pay)
+
+	spent, count := p.Spent()
+	if spent.Sign() != 0 {
+		t.Errorf("spent = %s, want 0. Without a hash the payer cannot ask.", spent)
+	}
+	if count != 0 {
+		t.Errorf("payments = %d, want 0", count)
+	}
+	if open := p.Open(); len(open) != 0 {
+		t.Errorf("Open() = %v, want nothing", open)
+	}
+}
+
+func TestUnresolvedTakesNil(t *testing.T) {
+	p, _ := newTestPayer(t, minimalConfig)
+	p.Unresolved(nil)
+	if open := p.Open(); len(open) != 0 {
+		t.Errorf("Open() = %v, want nothing", open)
+	}
+}
+
+func TestOpenPaymentsCountAgainstTheBudget(t *testing.T) {
+	// The budget covers 2 payments. The first goes missing, so the payer
+	// must still refuse the third.
+	p, chain := newTestPayer(t, minimalConfig+"budget: \"6000\"\n")
+
+	first := payOnce(t, p)
+	p.Unresolved(first)
+	chain.setTx(false, 0, errors.New("the sidecar did not answer"))
+
+	_ = payOnce(t, p)
+
+	_, err := p.Pay(context.Background(), testOption("1000"))
+	if err == nil {
+		t.Fatalf("the third payment was accepted, but the budget is 6000")
+	}
+	if !strings.Contains(err.Error(), "above budget") {
+		t.Errorf("error = %q, want it to name the budget", err)
 	}
 }
