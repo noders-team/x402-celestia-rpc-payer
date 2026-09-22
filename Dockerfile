@@ -20,7 +20,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/x402-celestia-rpc-payer ./cmd/x402-celestia-rpc-payer
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates \
  && adduser -D -u 10001 payer
 USER payer
