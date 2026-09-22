@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a security weakness
+    url: https://github.com/noders-team/x402-celestia-rpc-payer/security/advisories/new
+    about: >
+      Do not open a public issue for a weakness. Use this private report
+      instead. SECURITY.md says what the report needs.

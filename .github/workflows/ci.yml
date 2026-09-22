@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Check that go.mod and go.sum are tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test
+        run: go test -race -count=1 -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Coverage
+        run: go tool cover -func=coverage.txt | tail -1
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: gofmt
+        run: |
+          files=$(gofmt -s -l .)
+          if [ -n "$files" ]; then
+            echo "These files are not formatted. Run: gofmt -s -w ."
+            echo "$files"
+            exit 1
+          fi
+      # The linter runs through "go run", and not through the action, so that
+      # 1 pinned version covers CI and the Makefile.
+      #
+      # CAUTION: golangci-lint refuses a module whose Go version is above the
+      # Go version that built the linter. Raise this pin when you raise the
+      # "go" line of go.mod.
+      - name: golangci-lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
+
+  # The scan reports, but it does not block a merge.
+  #
+  # NOTE: cosmos-sdk reaches golang.org/x/crypto/openpgp through its client
+  # package. That advisory, GO-2026-5932, has no fix, so a blocking job would
+  # be red on every run and nobody would read it. Read this report at each
+  # release, and raise a dependency when a fix exists.
+  vuln:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - name: Run govulncheck
+        run: govulncheck ./...

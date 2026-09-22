@@ -1,0 +1,38 @@
+version: "2"
+
+linters:
+  enable:
+    - bodyclose
+    - errcheck
+    - gocritic
+    - govet
+    - ineffassign
+    - misspell
+    - nilerr
+    - revive
+    - staticcheck
+    - unconvert
+    - unparam
+    - unused
+  exclusions:
+    # std-error-handling is the list of calls whose error nobody checks:
+    # fmt.Fprint to a terminal, and Close in a defer. A check of those adds
+    # noise and hides a real finding.
+    presets:
+      - std-error-handling
+    rules:
+      # A test builds many small servers and writes many small bodies. An
+      # error of a test helper stops the test, so these 2 linters add noise.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0
