@@ -78,16 +78,29 @@ jobs:
       - name: golangci-lint
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 
-  # The scan reports, but it does not block a merge.
-  #
-  # NOTE: cosmos-sdk reaches golang.org/x/crypto/openpgp through its client
-  # package. That advisory, GO-2026-5932, has no fix, so a blocking job would
-  # be red on every run and nobody would read it. Read this report at each
+  # The scan reports, but it does not block a merge. Read this report at each
   # release, and raise a dependency when a fix exists.
+  #
+  # The job is red when the code calls a vulnerability that is not in
+  # VULN_IGNORE. govulncheck has no flag to ignore an advisory, so the job
+  # reads the JSON output of govulncheck.
+  #
+  # Each entry in VULN_IGNORE needs a reason here:
+  #
+  #   GO-2026-5932  golang.org/x/crypto/openpgp is unmaintained, and the
+  #                 advisory has no fix. cosmos-sdk reaches it through
+  #                 client -> crypto/keyring -> crypto, and x/auth/tx, which
+  #                 signs the payment, has the same path. So the payer cannot
+  #                 remove it. The traces are package init and an err.Error()
+  #                 call. The payer reads a mnemonic, and it does not use the
+  #                 armored keyring export. Remove this entry when cosmos-sdk
+  #                 no longer imports openpgp.
   vuln:
     name: Vulnerability scan
     runs-on: ubuntu-latest
     continue-on-error: true
+    env:
+      VULN_IGNORE: GO-2026-5932
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -97,4 +110,29 @@ jobs:
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Run govulncheck
-        run: govulncheck ./...
+        run: |
+          set -o pipefail
+
+          # The JSON mode exits with 0 when it finds a vulnerability, so this
+          # script makes the decision.
+          govulncheck -format json ./... > vuln.json
+
+          # A finding whose first frame names a function is a vulnerability
+          # that the code calls. The text mode fails on these findings only.
+          jq -r 'select(.finding.trace[0].function) | .finding
+            | "\(.osv)  \(.trace[0].module)@\(.trace[0].version)  fixed in: \(.fixed_version // "none")"' \
+            vuln.json | sort -u > called.txt
+
+          # awk compares the complete advisory ID in the first field.
+          new=$(awk -v ignore="${VULN_IGNORE}" '
+            BEGIN { n = split(ignore, ids, " "); for (i = 1; i <= n; i++) skip[ids[i]] = 1 }
+            !($1 in skip)' called.txt)
+
+          echo "Ignored (see the comment in ci.yml): ${VULN_IGNORE:-none}"
+          if [ -n "${new}" ]; then
+            echo "The code calls these vulnerabilities:"
+            echo "${new}"
+            echo "Run \"govulncheck ./...\" to see the traces."
+            exit 1
+          fi
+          echo "The code calls no other known vulnerability."
