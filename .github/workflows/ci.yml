@@ -1,8 +1,9 @@
 name: CI
 
+# A change enters main only through a pull request, and the pull request runs
+# these checks. So a push to main runs nothing. To run the checks on main, start
+# the workflow by hand in the Actions tab (workflow_dispatch).
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
