@@ -4,6 +4,9 @@ name: Release candidate
 # deploys it to the stage environment. The final release (vX.Y.Z) later
 # promotes the SAME image digest to prod. Do not rebuild for prod.
 #
+# It also creates a GitHub prerelease with the binaries for Linux and macOS
+# (release-binaries.yml).
+#
 # See docs/RELEASE.md for the complete flow.
 
 on:
@@ -92,19 +95,12 @@ jobs:
           echo "Add the stage deploy command here."
 
   prerelease:
-    name: Create the GitHub prerelease
+    name: Create the GitHub prerelease with the binaries
     needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Create the prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --prerelease
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-binaries.yml
+    with:
+      prerelease: true

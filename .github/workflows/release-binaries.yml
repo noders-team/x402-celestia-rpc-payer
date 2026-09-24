@@ -1,0 +1,76 @@
+name: Release binaries
+
+# A reusable workflow. It builds the binaries and creates the GitHub Release
+# with the binaries attached. The 2 tag workflows call it:
+#
+#   release-candidate.yml  (vX.Y.Z-rc.N)  prerelease: true
+#   release.yml            (vX.Y.Z)       prerelease: false
+#
+# The final release rebuilds the binaries from the commit of the approved rc.
+# It does not copy the rc files, because a binary prints its version, and a
+# copy would print the rc tag. The image is still promoted, not rebuilt.
+#
+# See docs/RELEASE.md for the complete flow.
+
+on:
+  workflow_call:
+    inputs:
+      prerelease:
+        description: Create a prerelease. If false, create the latest release.
+        type: boolean
+        required: true
+
+jobs:
+  release:
+    name: Build the binaries and create the release
+    runs-on: ubuntu-latest
+    # The caller must grant these permissions too. A called workflow cannot
+    # get more permissions than its caller.
+    permissions:
+      contents: write      # create the GitHub Release
+      id-token: write      # sign the build attestation
+      attestations: write  # store the build attestation
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the binaries
+        run: make dist VERSION="${GITHUB_REF_NAME}"
+
+      - name: Check the version in the binary
+        run: |
+          got=$(./dist/x402-celestia-rpc-payer-linux-amd64 version)
+          want="x402-celestia-rpc-payer ${GITHUB_REF_NAME}"
+          if [ "${got}" != "${want}" ]; then
+            echo "The binary prints \"${got}\". It must print \"${want}\"."
+            exit 1
+          fi
+
+      # A user checks a binary with:
+      #   gh attestation verify <file> --repo noders-team/x402-celestia-rpc-payer
+      - name: Attest the binaries
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/x402-celestia-rpc-payer-*
+
+      # 1 command creates the release and attaches the files, so a release
+      # never exists without its files.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if [ "${PRERELEASE}" = "true" ]; then
+            kind=--prerelease
+          else
+            kind=--latest
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            "${kind}" \
+            dist/*

@@ -18,6 +18,12 @@ and the numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
 
 ### Added
 
+- Each GitHub Release has binaries for Linux and macOS, on amd64 and arm64,
+  with `SHA256SUMS` and a build attestation. The prerelease of a release
+  candidate has them too. The README tells how to download and check them.
+- The `-version` flag, also as `--version`. It prints the same line as the
+  `version` command.
+- `make dist` builds the release binaries and `SHA256SUMS` into `dist/`.
 - `Payment.TxHash` holds the hash of the bytes that the payer signed. The
   payer computes it, so it knows the hash before the sidecar broadcasts the
   transaction.

@@ -6,12 +6,48 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/noders-team/x402-celestia-rpc-payer/payer"
 )
+
+// runMainEnv makes the test binary run main in place of the tests. A test sets
+// it to run the program in a child process, with the arguments of its choice.
+const runMainEnv = "X402_PAYER_TEST_RUN_MAIN"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(runMainEnv) == "1" {
+		main()
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+// runProgram runs main in a child process with args, and it returns the
+// output and the error of the process.
+func runProgram(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], args...)
+	cmd.Env = append(os.Environ(), runMainEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestVersionFlagPrintsTheVersion(t *testing.T) {
+	for _, arg := range []string{"-version", "--version"} {
+		out, err := runProgram(t, arg)
+		if err != nil {
+			t.Errorf("%s: %v, output:\n%s", arg, err, out)
+			continue
+		}
+		if want := "x402-celestia-rpc-payer dev\n"; out != want {
+			t.Errorf("%s: output = %q, want %q", arg, out, want)
+		}
+	}
+}
 
 func TestQuoteParam(t *testing.T) {
 	tests := []struct {

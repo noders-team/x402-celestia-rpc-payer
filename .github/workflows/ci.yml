@@ -25,6 +25,10 @@ jobs:
           cache: true
       - name: Build
         run: go build ./...
+      # The release workflows run "make dist". This step finds a target that
+      # does not build before a tag does. It publishes nothing.
+      - name: Build the release binaries
+        run: make dist
       - name: Check that go.mod and go.sum are tidy
         run: |
           go mod tidy
