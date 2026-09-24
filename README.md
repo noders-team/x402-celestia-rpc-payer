@@ -36,19 +36,74 @@ controls.
 
 ## Install
 
-You need Go 1.25 or later.
+### Download a binary
+
+Each [release](https://github.com/noders-team/x402-celestia-rpc-payer/releases)
+has 1 binary for each of these systems:
+
+| System | File |
+|---|---|
+| Linux, x86-64 | `x402-celestia-rpc-payer-linux-amd64` |
+| Linux, ARM64 | `x402-celestia-rpc-payer-linux-arm64` |
+| macOS, Intel | `x402-celestia-rpc-payer-darwin-amd64` |
+| macOS, Apple silicon | `x402-celestia-rpc-payer-darwin-arm64` |
+
+This example installs the newest release on Linux ARM64. For another system,
+change the value of `file`.
+
+```sh
+file=x402-celestia-rpc-payer-linux-arm64
+base=https://github.com/noders-team/x402-celestia-rpc-payer/releases/latest/download
+curl -fLO "$base/$file"
+curl -fLO "$base/SHA256SUMS"
+shasum -a 256 -c --ignore-missing SHA256SUMS
+chmod +x "$file"
+sudo mv "$file" /usr/local/bin/x402-celestia-rpc-payer
+x402-celestia-rpc-payer version
+```
+
+The `shasum` step must print `OK`. If it prints `FAILED`, do not run the file.
+On Linux, `sha256sum -c --ignore-missing SHA256SUMS` does the same check.
+
+`version` and `--version` print the version of the binary.
+
+For a release candidate, use the URL of its tag in place of `latest/download`,
+for example `.../releases/download/v0.2.0-rc.1`. A release candidate is a
+prerelease, so `latest` never points to one.
+
+**Check the origin.** The release workflow signs a build attestation for each
+binary. This command shows that this repository built the file:
+
+```sh
+gh attestation verify "$file" --repo noders-team/x402-celestia-rpc-payer
+```
+
+**macOS.** The binaries have no Apple signature. A download with `curl` runs.
+If you download the file with a browser, macOS blocks it with "cannot be
+opened because the developer cannot be verified". Remove the block with this
+command:
+
+```sh
+xattr -d com.apple.quarantine x402-celestia-rpc-payer-darwin-arm64
+```
+
+### Build from the source
+
+You need Go 1.26.5 or later.
 
 ```sh
 go install github.com/noders-team/x402-celestia-rpc-payer/cmd/x402-celestia-rpc-payer@latest
 ```
 
-Or build it from the source:
+Or clone the repository:
 
 ```sh
 git clone https://github.com/noders-team/x402-celestia-rpc-payer.git
 cd x402-celestia-rpc-payer
 make build          # -> bin/x402-celestia-rpc-payer
 ```
+
+`make dist` builds the 4 release binaries and `SHA256SUMS` into `dist/`.
 
 The module has only public dependencies, so the build needs no credentials.
 
@@ -117,6 +172,7 @@ Flags:
 | `-json` | `call`: use a JSON-RPC body instead of the path |
 | `-no-pay` | `serve`, `call` and `check`: do not pay, and give the 402 answer to the caller |
 | `-force` | `init`: write over a `config.yaml` that exists |
+| `-version` | print the version, the same as the `version` command. `--version` works too. |
 
 ### call
 

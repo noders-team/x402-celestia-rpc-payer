@@ -5,7 +5,7 @@ PKG     := ./cmd/$(BINARY)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
 
-.PHONY: all build install test race cover vet fmt fmt-check lint tidy check \
+.PHONY: all build install dist test race cover vet fmt fmt-check lint tidy check \
         address balance prices run docker clean help
 
 all: build
@@ -19,6 +19,24 @@ build:
 ## install: install the binary into $(go env GOPATH)/bin
 install:
 	go install -ldflags "$(LDFLAGS)" $(PKG)
+
+## dist: build the release binaries and SHA256SUMS into ./dist
+#
+# Each binary is static (CGO_ENABLED=0), so 1 machine builds every target. The
+# file name has no version, so the URL .../releases/latest/download/<file>
+# stays the same at each release. The release workflows run this target.
+PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
+dist:
+	@rm -rf dist
+	@mkdir -p dist
+	@for platform in $(PLATFORMS); do \
+		os=$${platform%/*}; arch=$${platform#*/}; \
+		out=dist/$(BINARY)-$$os-$$arch; \
+		echo "build $$out $(VERSION)"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
+			go build -trimpath -ldflags "-s -w $(LDFLAGS)" -o $$out $(PKG) || exit 1; \
+	done
+	cd dist && shasum -a 256 $(BINARY)-* > SHA256SUMS
 
 ## test: run the tests with the race detector
 test:

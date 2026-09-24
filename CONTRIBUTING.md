@@ -12,7 +12,7 @@ short agreement on the plan saves work for you and for the reviewer.
 
 ## Build and test
 
-You need Go 1.25 or later. The module has no private dependency, so a clone
+You need Go 1.26.5 or later. The module has no private dependency, so a clone
 and a build are enough.
 
 ```sh

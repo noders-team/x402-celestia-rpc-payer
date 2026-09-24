@@ -1,8 +1,12 @@
 name: Release
 
 # A final release tag (vX.Y.Z) promotes the tested RC image to prod. It does
-# NOT rebuild: it adds the release tags to the SAME image digest that the
-# release candidate built and tested on stage (build once, deploy many).
+# NOT rebuild the image: it adds the release tags to the SAME image digest that
+# the release candidate built and tested on stage (build once, deploy many).
+#
+# It then creates the GitHub Release with the binaries (release-binaries.yml).
+# The binaries ARE rebuilt from the same commit, so that they print the final
+# version and not the rc version.
 #
 # The final tag and the approved RC tag must point to the same commit, so the
 # image tagged sha-<commit> exists. If it does not, this workflow stops.
@@ -102,20 +106,15 @@ jobs:
           #   ${{ needs.promote.outputs.source }}
           echo "Add the prod deploy command here."
 
+  # The release waits for "promote", so a final release and its binaries exist
+  # only after an rc of the same commit.
   github-release:
-    name: Create the GitHub Release
+    name: Create the GitHub Release with the binaries
     needs: promote
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-
-      - name: Create the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes \
-            --latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/release-binaries.yml
+    with:
+      prerelease: false

@@ -34,12 +34,13 @@ A release candidate adds a suffix: `vMAJOR.MINOR.PATCH-rc.N`.
 The final release tag and the approved release candidate tag point to the same
 commit.
 
-## The 2 workflows
+## The workflows
 
 | File | Trigger | What it does |
 |---|---|---|
-| `.github/workflows/release-candidate.yml` | a tag `vX.Y.Z-rc.N` | Builds the RC image. Tags it with the rc version and `sha-<commit>`. Pushes it. Deploys it to `stage`. |
-| `.github/workflows/release.yml` | a tag `vX.Y.Z` | Finds the `sha-<commit>` image that the RC built. Adds the release tag and `latest` to that same digest. Deploys it to `prod`. |
+| `.github/workflows/release-candidate.yml` | a tag `vX.Y.Z-rc.N` | Builds the RC image. Tags it with the rc version and `sha-<commit>`. Pushes it. Deploys it to `stage`. Creates a GitHub prerelease with the binaries. |
+| `.github/workflows/release.yml` | a tag `vX.Y.Z` | Finds the `sha-<commit>` image that the RC built. Adds the release tag and `latest` to that same digest. Deploys it to `prod`. Creates the GitHub Release with the binaries. |
+| `.github/workflows/release-binaries.yml` | a call from the 2 workflows above | Builds the binaries with `make dist`. Checks the version in the binary. Attests the binaries. Creates the release with the binaries attached. |
 
 The image goes to `ghcr.io/<owner>/<repo>`. The workflow signs in with the
 built-in `GITHUB_TOKEN`.
@@ -47,6 +48,45 @@ built-in `GITHUB_TOKEN`.
 The final release does not rebuild. It promotes the tested digest. If no
 `sha-<commit>` image exists, the release workflow stops, because a final release
 must promote an approved release candidate.
+
+## The binaries
+
+Each GitHub Release has these files:
+
+- `x402-celestia-rpc-payer-linux-amd64`
+- `x402-celestia-rpc-payer-linux-arm64`
+- `x402-celestia-rpc-payer-darwin-amd64`
+- `x402-celestia-rpc-payer-darwin-arm64`
+- `SHA256SUMS`
+
+The file names have no version. So the URL
+`https://github.com/noders-team/x402-celestia-rpc-payer/releases/latest/download/<file>`
+always gives the newest final release. `latest` never points to a
+prerelease.
+
+The image and the binaries follow different rules:
+
+- The final release promotes the image. It does not rebuild it.
+- The final release rebuilds the binaries from the same commit as the approved
+  release candidate. A binary prints its version, so a copy of the rc binary
+  would print the rc tag. The workflow runs `version` on the binary, and it
+  stops if the output is not the tag.
+
+The final release waits for the image promotion. So a final release and its
+binaries exist only after a release candidate of the same commit.
+
+The workflow signs a build attestation for each binary. Check a file with
+this command:
+
+```sh
+gh attestation verify <file> --repo noders-team/x402-celestia-rpc-payer
+```
+
+The binaries have no Apple signature. The README gives the command that
+removes the macOS block from a file that a browser downloaded.
+
+CI runs `make dist` on each pull request. So a target that does not build
+stops the pull request, and not the release.
 
 ## The prod gate
 

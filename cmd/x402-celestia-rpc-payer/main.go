@@ -50,12 +50,18 @@ func main() {
 	jsonRPC := fs.Bool("json", false, "call: use a JSON-RPC body instead of the path")
 	noPay := fs.Bool("no-pay", false, "serve, call and check: do not pay. Give the 402 answer to the caller.")
 	force := fs.Bool("force", false, "init: write over a config.yaml that exists")
+	showVersion := fs.Bool("version", false, "print the version, the same as the version command")
 	fs.Usage = usage
 
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
 	args := fs.Args()
+	// Many users type "--version" before they read the usage. The flag does
+	// what the command does, and it ignores the rest of the arguments.
+	if *showVersion {
+		args = []string{"version"}
+	}
 	if len(args) == 0 {
 		usage()
 		os.Exit(2)
@@ -138,6 +144,7 @@ Flags:
   -json               call: use a JSON-RPC body instead of the path
   -no-pay             serve, call and check: do not pay, and give the 402 to the caller
   -force              init: write over a config.yaml that exists
+  -version            print the version, the same as the version command
 
 Examples:
   x402-celestia-rpc-payer init http://localhost:26658
