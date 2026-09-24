@@ -59,13 +59,14 @@ message.
 
 ## The dependencies
 
-CI runs `govulncheck` on each push. The job reports, but it does not block a
-merge.
+CI runs `govulncheck` on each pull request. The job is red when the code calls
+a vulnerability that is not on the ignore list (`VULN_IGNORE`) in
+`.github/workflows/ci.yml`. The job does not block a merge.
 
 NOTE: cosmos-sdk reaches `golang.org/x/crypto/openpgp` through its client
 package. The advisory GO-2026-5932 says that the package is unmaintained, and
-it has no fix. A blocking job would be red on every run, and nobody would read
-it. The payer does not open a PGP message.
+it has no fix. The payer does not open a PGP message. So the ignore list has
+GO-2026-5932, and the comment in `ci.yml` gives the reason.
 
 Run the scan yourself with:
 
