@@ -41,6 +41,16 @@ and the numbers follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html
   only when the sidecar answered and refused the payment, because the sidecar
   broadcast nothing in that case.
 
+### Security
+
+- The build uses Go 1.26.8 through the `toolchain` line of `go.mod`. Go 1.26.5
+  has 6 known vulnerabilities in `net/http`, `net/url`, `crypto/tls`,
+  `html/template` and `encoding/asn1`. A program that imports the `payer`
+  package can still use Go 1.26.5.
+- `google.golang.org/grpc` v1.82.1 -> v1.83.1 (GO-2026-6348) and
+  `github.com/pion/dtls/v3` v3.1.2 -> v3.1.4 (GO-2026-6165). Both are
+  indirect.
+
 ### Requires
 
 - The sidecar must serve the free route `GET /x402/tx?hash=…`. An older
